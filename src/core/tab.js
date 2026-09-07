@@ -243,6 +243,11 @@ export async function newTab({ layout, name } = {}) {
     action: wantNew ? 'new_layout_created' : 'layout_opened_in_new_tab',
     layout: picked,
     chart_id: chartTarget.url.match(/\/chart\/([^/?]+)/)?.[1] || null,
+    // The CDP target id, not the TradingView layout id. This is what pins a session
+    // to the tab it just created; without it the caller had to run "tab list"
+    // afterwards and guess which entry was theirs.
+    target_id: chartTarget.id,
+    pin_hint: `export TV_TARGET_ID=${chartTarget.id}`,
   };
 }
 

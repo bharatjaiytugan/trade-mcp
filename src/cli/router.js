@@ -53,6 +53,21 @@ function printCommandHelp(name, cmd) {
 export async function run(argv) {
   const args = argv.slice(2);
 
+  // Global --tab <id>: pin this one call to a CDP target, then strip it so no
+  // individual command ever sees it. Same effect as exporting TV_TARGET_ID, for
+  // a single invocation.
+  const tabAt = args.findIndex(a => a === '--tab' || a.startsWith('--tab='));
+  if (tabAt !== -1) {
+    const inline = args[tabAt].startsWith('--tab=');
+    const id = inline ? args[tabAt].slice(6) : args[tabAt + 1];
+    if (!id) {
+      console.error('--tab requires a CDP target id. Run "tv tab list" to see them.');
+      process.exit(1);
+    }
+    process.env.TV_TARGET_ID = id;
+    args.splice(tabAt, inline ? 1 : 2);
+  }
+
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
     printHelp();
     process.exit(0);

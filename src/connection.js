@@ -68,10 +68,31 @@ export async function connect(targetId = null) {
   let lastError;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const target = targetId ? await findTargetById(targetId) : await findChartTarget();
+      // TV_TARGET_ID is the only pin that survives the CLI's process model: every
+      // `tv` call is a fresh node process, so the module-level client/targetInfo
+      // above die with it, and tab_switch holds only for the long-lived MCP server.
+      // Export it once per shell and every later command follows that tab.
+      //
+      // Why it exists: the chart window is SHARED. Confirmed 2026-09-04 - three
+      // consecutive reads for one ticker returned three different companies because
+      // a second agent moved the chart between the write and the read.
+      const pinned = targetId || process.env.TV_TARGET_ID || null;
+      const target = pinned ? await findTargetById(pinned) : await findChartTarget();
+      if (!target && pinned) {
+        // A missing pinned target is a settled fact, not a transient fault. Retrying
+        // it five times with exponential backoff just makes the user wait ~30s for an
+        // answer that was already known on attempt one.
+        throw Object.assign(new Error(
+          `CDP target ${pinned} not found - the pinned tab was closed, or TradingView `
+          + `restarted. Run "tv tab list" and re-export TV_TARGET_ID, or unset it.`),
+          { fatal: true });
+      }
       if (!target) {
-        throw new Error(targetId
-          ? `CDP target ${targetId} not found — is the tab still open?`
+        // A pin that has gone missing must FAIL, never fall back to whatever chart
+        // is first - that would silently restore the collision the pin prevents.
+        throw new Error(pinned
+          ? `CDP target ${pinned} not found - the pinned tab was closed, or TradingView restarted. `
+            + `Run "tv tab list" and re-export TV_TARGET_ID, or unset it to use the first chart tab.`
           : 'No TradingView chart target found. Is TradingView open with a chart?');
       }
       targetInfo = target;
@@ -84,6 +105,7 @@ export async function connect(targetId = null) {
 
       return client;
     } catch (err) {
+      if (err.fatal) throw err;   // no point retrying a target that does not exist
       lastError = err;
       const delay = Math.min(BASE_DELAY * Math.pow(2, attempt), 30000);
       await new Promise(r => setTimeout(r, delay));
@@ -110,10 +132,20 @@ export async function reconnectTo(targetId) {
 async function findChartTarget() {
   const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
-  // Prefer targets with tradingview.com/chart in the URL
-  return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
-    || targets.find(t => t.type === 'page' && /tradingview/i.test(t.url))
-    || null;
+  const chart = targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
+  if (chart) return chart;
+
+  // The old fallback accepted ANY tradingview URL. With no chart open it attached
+  // to an options-chain or screener page and every later read failed in a way that
+  // looked like a data problem rather than a wrong-target problem.
+  const other = targets.find(t => t.type === 'page' && /tradingview/i.test(t.url));
+  if (other) {
+    throw new Error(
+      `No TradingView CHART tab is open. The only TradingView page found is `
+      + `"${(other.title || other.url || '').slice(0, 60)}", which has no chart API. `
+      + `Open a chart tab, or pin one with TV_TARGET_ID.`);
+  }
+  return null;
 }
 
 async function findTargetById(id) {
