@@ -11,6 +11,7 @@ import { execFileSync, execSync } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { writeFileSync, unlinkSync } from 'fs';
+import { extractTabFlag, isConnectionFailure } from '../src/cli/router.js';
 
 function require_fs() { return { writeFileSync, unlinkSync }; }
 
@@ -129,7 +130,73 @@ describe('CLI — pine analyze (offline)', () => {
   });
 });
 
-describe('CLI — pine check (server compile)', () => {
+describe('CLI — global --tab flag', () => {
+  it('extractTabFlag: absent flag leaves args untouched', () => {
+    const r = extractTabFlag(['quote', 'AAPL']);
+    assert.deepEqual(r, { args: ['quote', 'AAPL'], tabId: null, error: null });
+  });
+
+  it('extractTabFlag: --tab <id> is stripped and returned', () => {
+    const r = extractTabFlag(['--tab', 'ABC123', 'quote', 'AAPL']);
+    assert.equal(r.tabId, 'ABC123');
+    assert.deepEqual(r.args, ['quote', 'AAPL']);
+    assert.equal(r.error, null);
+  });
+
+  it('extractTabFlag: --tab=<id> inline form works anywhere in argv', () => {
+    const r = extractTabFlag(['quote', 'AAPL', '--tab=XYZ']);
+    assert.equal(r.tabId, 'XYZ');
+    assert.deepEqual(r.args, ['quote', 'AAPL']);
+  });
+
+  it('extractTabFlag: does not mutate its input', () => {
+    const input = ['--tab', 'T1', 'state'];
+    extractTabFlag(input);
+    assert.deepEqual(input, ['--tab', 'T1', 'state']);
+  });
+
+  it('extractTabFlag: --tab with no value is an error', () => {
+    assert.match(extractTabFlag(['--tab']).error, /--tab requires/);
+    assert.match(extractTabFlag(['--tab=']).error, /--tab requires/);
+    // A following flag is not a target id.
+    assert.match(extractTabFlag(['--tab', '--help']).error, /--tab requires/);
+  });
+
+  it('CLI: --tab <id> before --help still prints help (exit 0)', () => {
+    const { stdout, exitCode } = run(['--tab', 'ABC123', '--help']);
+    assert.equal(exitCode, 0);
+    assert.ok(stdout.includes('Usage: tv'));
+  });
+
+  it('CLI: --tab=<id> with a subcommand help routes normally', () => {
+    const { stdout, exitCode } = run(['--tab=ABC123', 'pine', '--help']);
+    assert.equal(exitCode, 0);
+    assert.ok(stdout.includes('analyze'));
+  });
+
+  it('CLI: bare --tab exits 1 with a usage message', () => {
+    const { exitCode, stderr } = run(['--tab']);
+    assert.equal(exitCode, 1);
+    assert.ok(stderr.includes('--tab requires'));
+  });
+});
+
+describe('CLI — exit code classification', () => {
+  it('connection-shaped errors map to exit 2', () => {
+    assert.ok(isConnectionFailure('CDP connection failed after 5 attempts: fetch failed'));
+    assert.ok(isConnectionFailure('TradingView is not reachable: connection refused at 127.0.0.1:9222 (ECONNREFUSED)'));
+    assert.ok(isConnectionFailure('No TradingView CHART tab is open. The only TradingView page found is "Screener"'));
+    assert.ok(isConnectionFailure('No TradingView chart target found. Is TradingView open with a chart?'));
+  });
+
+  it('ordinary command errors stay exit 1', () => {
+    assert.equal(isConnectionFailure('Unknown chart type: Foo'), false);
+    assert.equal(isConnectionFailure('chart did not confirm symbol CIFR within 10s; chart shows AAPL'), false);
+  });
+});
+
+// Calls TradingView's compile endpoint over the network — opt in with TV_TEST_NETWORK=1.
+describe('CLI — pine check (server compile)', { skip: !process.env.TV_TEST_NETWORK && 'set TV_TEST_NETWORK=1 to run (network call to TradingView)' }, () => {
   it('compiles valid Pine Script', () => {
     const source = '//@version=6\nindicator("test")\nplot(close)';
     const { stdout, exitCode } = run(['pine', 'check'], { input: source });

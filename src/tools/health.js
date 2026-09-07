@@ -4,8 +4,10 @@ import * as core from '../core/health.js';
 import { update } from '../core/update.js';
 
 export function registerHealthTools(server) {
-  server.tool('tv_health_check', 'Check CDP connection to TradingView and return current chart state', {}, async () => {
-    try { return jsonResult(await core.healthCheck()); }
+  server.tool('tv_health_check', 'Check CDP connection to TradingView and return current chart state. Returns cdp_connected:false with an error (not a failure) when TradingView is not reachable.', {
+    check_update: z.coerce.boolean().optional().describe('Also compare the local git HEAD with GitHub (network call; default false)'),
+  }, async ({ check_update }) => {
+    try { return jsonResult(await core.healthCheck({ check_update })); }
     catch (err) { return jsonResult({ success: false, error: err.message, hint: 'TradingView is not running with CDP enabled. Use the tv_launch tool to start it automatically.' }, true); }
   });
 

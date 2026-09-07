@@ -162,6 +162,16 @@ tv pane symbol 1 ES1!              # set pane symbol
 tv stream quote | jq '.close'      # monitor price changes
 ```
 
+### Shared-chart safety
+
+The chart window is shared with whoever else is driving TradingView (another agent, the user). Commands that move it are guarded:
+
+- `tv symbol X` / `tv timeframe X` succeed only once the chart API confirms the new symbol/resolution and a settled bar series (`confirmed: true`, plus `chart_symbol` / `chart_resolution`). If the chart never confirms within 10 seconds the command fails with `chart did not confirm symbol X within 10s; chart shows Y` instead of returning whatever is on screen. Symbols are compared by ticker, so `CIFR` is confirmed by `BATS:CIFR`.
+- `tv quote SYM` on a chart showing a different symbol is **refused**. Pass `--force-switch` to switch, read, and restore (`tv quote SYM --force-switch`), or run `tv symbol SYM` first and then `tv quote`.
+- `tv ohlcv -n N` pages history in via the feed until N bars are loaded (max 500); the output reports `requested`, `bar_count`, `total_available` and `truncated`.
+- `tv status` reports `cdp_connected: false` (exit 2) when TradingView is not running instead of crashing; add `--check-update` to also compare against GitHub (a network call, off by default).
+- `--tab <id>` (or `--tab=<id>`) pins a single invocation to a CDP target; `TV_TARGET_ID` does the same for a whole shell.
+
 ### All Commands
 
 ```
@@ -217,7 +227,7 @@ Claude reads [`CLAUDE.md`](CLAUDE.md) automatically when working in this project
 | "Draw a level at 24500" | `draw_shape` (horizontal_line) |
 | "Take a screenshot" | `capture_screenshot` |
 
-## Tool Reference (78 MCP tools)
+## Tool Reference (84 MCP tools)
 
 ### Chart Reading
 
@@ -341,11 +351,16 @@ The key flag: `--remote-debugging-port=9222`
 ## Testing
 
 ```bash
-# Requires TradingView running with --remote-debugging-port=9222
-npm test
+npm test              # unit suites only — no TradingView needed
+npm run test:e2e      # requires TradingView running with --remote-debugging-port=9222
+TV_TEST_NETWORK=1 npm run test:cli   # also runs the `pine check` cases (network call to TradingView)
 ```
 
-29 tests covering: Pine Script static analysis, server-side compilation, and CLI routing.
+Unit suites cover: Pine Script static analysis, CLI routing and the global `--tab` flag, CDP input sanitization, chart readiness comparison, OHLCV paging and the quote shared-chart guard, replay, launch, indicator management, history paging, and self-update.
+
+### Root helper scripts
+
+The repo root carries 14 standalone `.mjs` scripts used directly by skills (they are not part of the MCP server or the `tv` CLI, and stay where they are): `capture_full_watchlist.mjs`, `capture_full_watchlist_full.mjs`, `chain_ctl.mjs`, `click_and_scroll.mjs`, `click_expiry.mjs`, `dump_chain.mjs`, `find_scroll_container.mjs`, `get_watchlist_sections.mjs`, `grab_watchlist.mjs`, `inspect_watchlist_header.mjs`, `nav_js.mjs`, `read_expiry_rows.mjs`, `read_options_chain.mjs`, `scroll_watchlist.mjs`.
 
 ## Architecture
 
@@ -353,7 +368,7 @@ npm test
 Claude Code  ←→  MCP Server (stdio)  ←→  CDP (port 9222)  ←→  TradingView Desktop (Electron)
 ```
 
-- **Transport**: MCP over stdio (84 tools) + CLI (`tv` command, 30 commands with 66 subcommands)
+- **Transport**: MCP over stdio (84 tools) + CLI (`tv` command, 29 commands with 71 subcommands)
 - **Connection**: Chrome DevTools Protocol on localhost:9222
 - **Streaming**: Poll-and-diff loop with deduplication, JSONL output to stdout
 - **No dependencies** beyond `@modelcontextprotocol/sdk` and `chrome-remote-interface`

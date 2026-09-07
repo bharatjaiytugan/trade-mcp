@@ -2,7 +2,7 @@
  * Core chart control logic.
  */
 import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite } from '../connection.js';
-import { waitForChartReady as _waitForChartReady } from '../wait.js';
+import { waitForChartReady as _waitForChartReady, DEFAULT_TIMEOUT as READY_TIMEOUT_MS } from '../wait.js';
 
 const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
 
@@ -37,8 +37,25 @@ export async function getState({ _deps } = {}) {
   return { success: true, ...state };
 }
 
+// What the chart shows right now, straight from the API. Never throws — it
+// builds the "chart shows Y" half of a confirmation failure, and the
+// chart_symbol / chart_resolution fields of a success.
+async function readChartHead(evaluate) {
+  try {
+    const head = await evaluate(`
+      (function() {
+        try { var chart = ${CHART_API}; return { symbol: chart.symbol(), resolution: chart.resolution() }; }
+        catch (e) { return { error: e.message }; }
+      })()
+    `);
+    return head && !head.error ? head : {};
+  } catch { return {}; }
+}
+
+const READY_TIMEOUT_S = Math.round(READY_TIMEOUT_MS / 1000);
+
 export async function setSymbol({ symbol, _deps }) {
-  const { evaluateAsync, waitForChartReady } = _resolve(_deps);
+  const { evaluate, evaluateAsync, waitForChartReady } = _resolve(_deps);
   await evaluateAsync(`
     (function() {
       var chart = ${CHART_API};
@@ -48,8 +65,15 @@ export async function setSymbol({ symbol, _deps }) {
       });
     })()
   `);
-  const ready = await waitForChartReady(symbol);
-  return { success: true, symbol, chart_ready: ready };
+  // The chart is shared: another agent (or the user) can move it between our
+  // write and our read. Only report success once the API itself confirms the
+  // requested symbol is loaded and settled — never on a timeout.
+  const confirmed = await waitForChartReady(symbol, null, READY_TIMEOUT_MS);
+  const head = await readChartHead(evaluate);
+  if (!confirmed) {
+    throw new Error(`chart did not confirm symbol ${symbol} within ${READY_TIMEOUT_S}s; chart shows ${head.symbol || 'unknown'}`);
+  }
+  return { success: true, symbol, confirmed: true, chart_symbol: head.symbol ?? null, chart_resolution: head.resolution ?? null };
 }
 
 export async function setTimeframe({ timeframe, _deps }) {
@@ -60,8 +84,12 @@ export async function setTimeframe({ timeframe, _deps }) {
       chart.setResolution(${safeString(timeframe)}, {});
     })()
   `);
-  const ready = await waitForChartReady(null, timeframe);
-  return { success: true, timeframe, chart_ready: ready };
+  const confirmed = await waitForChartReady(null, timeframe, READY_TIMEOUT_MS);
+  const head = await readChartHead(evaluate);
+  if (!confirmed) {
+    throw new Error(`chart did not confirm resolution ${timeframe} within ${READY_TIMEOUT_S}s; chart shows ${head.resolution || 'unknown'}`);
+  }
+  return { success: true, timeframe, confirmed: true, chart_symbol: head.symbol ?? null, chart_resolution: head.resolution ?? null };
 }
 
 export async function setType({ chart_type, _deps }) {
