@@ -25,8 +25,10 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_save', 'Save the current Pine Script (Ctrl+S)', {}, async () => {
-    try { return jsonResult(await core.save()); }
+  server.tool('pine_save', 'Save the current Pine Script (Ctrl+S). Verifies which saved script actually changed and errors if it is not the one you opened.', {
+    force: z.boolean().optional().describe('Skip the save-target check. Only set this if you intend to write to whatever script the editor is bound to.'),
+  }, async ({ force }) => {
+    try { return jsonResult(await core.save({ force })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
@@ -35,20 +37,22 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_smart_compile', 'Intelligent compile: detects button, compiles, checks errors, reports study changes', {}, async () => {
-    try { return jsonResult(await core.smartCompile()); }
+  server.tool('pine_smart_compile', 'Intelligent compile: detects button, compiles, checks errors, reports study changes. Verifies which saved script actually changed and errors if it is not the one you opened.', {
+    force: z.boolean().optional().describe('Skip the save-target check. Only set this if you intend to write to whatever script the editor is bound to.'),
+  }, async ({ force }) => {
+    try { return jsonResult(await core.smartCompile({ force })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_new', 'Create a new blank Pine Script', {
+  server.tool('pine_new', 'Reset the Pine Editor buffer to a blank template. NOTE: this does not create a saved script and does not change the save target — see the warning in the result.', {
     type: z.enum(['indicator', 'strategy', 'library']).describe('Type of script to create'),
   }, async ({ type }) => {
     try { return jsonResult(await core.newScript({ type })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_open', 'Open a saved Pine Script by name', {
-    name: z.string().describe('Name of the saved script to open (case-insensitive match)'),
+  server.tool('pine_open', 'Load a saved Pine Script into the editor by name. Matches script name before title. NOTE: this replaces the editor text only; TradingView\'s save target is not rebound — see the warning in the result.', {
+    name: z.string().describe('Name of the saved script to open (case-insensitive; exact name wins over exact title, then substring)'),
   }, async ({ name }) => {
     try { return jsonResult(await core.openScript({ name })); }
     catch (err) { return jsonResult({ success: false, source: 'internal_api', error: err.message }, true); }

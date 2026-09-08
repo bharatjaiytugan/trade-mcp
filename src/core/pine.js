@@ -35,6 +35,134 @@ const FIND_MONACO = `
   })()
 `;
 
+
+// ── Save-target tracking ──
+// TradingView keeps the Pine Editor bound to exactly one saved script.
+// Injecting text with monaco.setValue() does NOT move that binding, so a save
+// issued after pine_open or pine_new lands on whichever script was bound
+// before — silently, and reported as success. The binding is not readable
+// from the page, so instead we snapshot the saved-script list around every
+// save and report which script actually changed. That turns a silent
+// overwrite into a loud, named error.
+// See https://github.com/tradesdontlie/tradingview-mcp/issues/513
+let pendingOpen = null;
+
+const SAVE_SETTLE_MS = 1200;
+
+/**
+ * Resolve a saved script by name.
+ * Precedence: exact scriptName, exact scriptTitle, then substring on each.
+ * Matching name and title with equal precedence let a script whose *title*
+ * collided with the query win over the script actually *named* that.
+ * Pure — exported for tests.
+ */
+export function resolveScriptMatch(scripts, name) {
+  const target = String(name ?? '').trim().toLowerCase();
+  if (!target || !Array.isArray(scripts)) return null;
+  const lc = (v) => String(v ?? '').toLowerCase();
+  const passes = [
+    ['name (exact)', (sc) => lc(sc.name) === target],
+    ['title (exact)', (sc) => lc(sc.title) === target],
+    ['name (substring)', (sc) => lc(sc.name).includes(target)],
+    ['title (substring)', (sc) => lc(sc.title).includes(target)],
+  ];
+  for (const [matched_on, pred] of passes) {
+    const script = scripts.find(pred);
+    if (script) return { script, matched_on };
+  }
+  return null;
+}
+
+/**
+ * Which scripts differ between two snapshots of the saved-script list.
+ * Newly created scripts sort ahead of updated ones.
+ * Pure — exported for tests.
+ */
+export function diffScriptVersions(before, after) {
+  if (!Array.isArray(before) || !Array.isArray(after)) return [];
+  const prev = new Map(before.map((sc) => [sc.id, sc]));
+  const changed = [];
+  for (const sc of after) {
+    const was = prev.get(sc.id);
+    if (!was) {
+      changed.push({ ...sc, change: 'created' });
+    } else if (String(was.version) !== String(sc.version) || String(was.modified) !== String(sc.modified)) {
+      changed.push({ ...sc, change: 'updated', from_version: was.version });
+    }
+  }
+  return changed.sort((a, b) => (a.change === 'created' ? -1 : 0) - (b.change === 'created' ? -1 : 0));
+}
+
+/** Snapshot the saved-script list. Returns null if it cannot be read. */
+async function fetchSavedScriptIndex() {
+  const data = await evaluateAsync(`
+    fetch('https://pine-facade.tradingview.com/pine-facade/list/?filter=saved', { credentials: 'include' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (!Array.isArray(d)) return {error: 'Unexpected response from pine-facade'};
+        return d.map(function(s) {
+          return {
+            id: s.scriptIdPart || null,
+            name: s.scriptName || s.scriptTitle || 'Untitled',
+            title: s.scriptTitle || null,
+            version: s.version || null,
+            modified: s.modified || null,
+          };
+        });
+      })
+      .catch(function(e) { return {error: e.message}; })
+  `);
+  return Array.isArray(data) ? data : null;
+}
+
+/**
+ * Compare the saved-script list before and after a save and report which
+ * script actually changed. Throws if it is not the one the caller opened.
+ */
+async function verifySaveTarget(before, { force = false } = {}) {
+  const expected = pendingOpen;
+
+  if (!before) {
+    return { save_target: null, save_verified: false, note: 'Could not snapshot the saved-script list; save target unverified.' };
+  }
+
+  await new Promise((r) => setTimeout(r, SAVE_SETTLE_MS));
+  const after = await fetchSavedScriptIndex();
+  if (!after) {
+    return { save_target: null, save_verified: false, note: 'Could not re-read the saved-script list; save target unverified.' };
+  }
+
+  const changed = diffScriptVersions(before, after);
+  if (changed.length === 0) {
+    return { save_target: null, save_verified: false, note: 'No saved script changed. The save may not have completed.' };
+  }
+
+  const hit = changed[0];
+  const target = { id: hit.id, name: hit.name, title: hit.title, version: hit.version, change: hit.change };
+
+  if (expected) {
+    const wrongScript = expected.id && hit.id !== expected.id;
+    const shouldHaveBeenNew = expected.isNew && hit.change === 'updated';
+    if (wrongScript || shouldHaveBeenNew) {
+      pendingOpen = null;
+      if (!force) {
+        const wanted = expected.isNew ? 'a newly created script' : `"${expected.name}" (${expected.id})`;
+        throw new Error(
+          `Save landed on the wrong script. Expected ${wanted}, but "${hit.name}" (${hit.id}) was overwritten ` +
+          `and is now at version ${hit.version}. TradingView keeps the Pine Editor bound to one script, and ` +
+          `pine_open / pine_new only replace the editor text — they do not move that binding (issue #513). ` +
+          `Restore "${hit.name}" from its version history, then switch scripts using the editor's own ` +
+          `Open / Save as. Pass force:true to skip this check.`
+        );
+      }
+      return { save_target: target, save_verified: false, note: 'Save-target mismatch suppressed by force:true.' };
+    }
+  }
+
+  pendingOpen = null;
+  return { save_target: target, save_verified: true };
+}
+
 /**
  * Opens the Pine Editor panel and waits for Monaco to become available.
  * Returns true if editor is accessible, false on timeout.
@@ -344,9 +472,11 @@ export async function getErrors() {
   };
 }
 
-export async function save() {
+export async function save({ force = false } = {}) {
   const editorReady = await ensurePineEditorOpen();
   if (!editorReady) throw new Error('Could not open Pine Editor.');
+
+  const before = await fetchSavedScriptIndex();
 
   const c = await getClient();
   await c.Input.dispatchKeyEvent({ type: 'keyDown', modifiers: 2, key: 's', code: 'KeyS', windowsVirtualKeyCode: 83 });
@@ -373,7 +503,9 @@ export async function save() {
 
   if (dialogHandled) await new Promise(r => setTimeout(r, 500));
 
-  return { success: true, action: dialogHandled ? 'saved_with_dialog' : 'Ctrl+S_dispatched' };
+  const verdict = await verifySaveTarget(before, { force });
+
+  return { success: true, action: dialogHandled ? 'saved_with_dialog' : 'Ctrl+S_dispatched', ...verdict };
 }
 
 export async function getConsole() {
@@ -426,9 +558,13 @@ export async function getConsole() {
   return { success: true, entries: entries || [], entry_count: entries?.length || 0 };
 }
 
-export async function smartCompile() {
+export async function smartCompile({ force = false } = {}) {
   const editorReady = await ensurePineEditorOpen();
   if (!editorReady) throw new Error('Could not open Pine Editor.');
+
+  // smartCompile clicks the editor's own Save button, so it writes to the same
+  // bound script pine_save does and needs the same verification (issue #513).
+  const savedBefore = await fetchSavedScriptIndex();
 
   const studiesBefore = await evaluate(`
     (function() {
@@ -496,12 +632,15 @@ export async function smartCompile() {
 
   const studyAdded = (studiesBefore !== null && studiesAfter !== null) ? studiesAfter > studiesBefore : null;
 
+  const verdict = await verifySaveTarget(savedBefore, { force });
+
   return {
     success: true,
     button_clicked: buttonClicked || 'keyboard_shortcut',
     has_errors: errors?.length > 0,
     errors: errors || [],
     study_added: studyAdded,
+    ...verdict,
   };
 }
 
@@ -531,61 +670,71 @@ export async function newScript({ type }) {
 
   if (!set) throw new Error('Monaco editor not found. Ensure Pine Editor is open.');
 
-  return { success: true, type, action: 'new_script_created', template: typeMap[type] };
+  // This only replaces the editor buffer. TradingView still has the editor
+  // bound to the previously open script, so the next save would overwrite that
+  // script rather than create a new one. Flag it so verifySaveTarget can catch
+  // the overwrite instead of letting it through silently (issue #513).
+  pendingOpen = { id: null, name: null, isNew: true };
+
+  return {
+    success: true,
+    type,
+    action: 'editor_buffer_reset',
+    template: typeMap[type],
+    warning: 'This replaced the editor text only — no new script was created and the save target has NOT changed. '
+      + 'Saving now would overwrite the previously open script; the save is verified and will fail loudly if it does. '
+      + "Use the Pine Editor's own New / Save as to genuinely create a script.",
+  };
 }
 
 export async function openScript({ name }) {
   const editorReady = await ensurePineEditorOpen();
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
-  const escapedName = JSON.stringify(name.toLowerCase());
+  const scripts = await fetchSavedScriptIndex();
+  if (!scripts) throw new Error('Could not read the saved script list from pine-facade.');
 
-  const result = await evaluateAsync(`
-    (function() {
-      var target = ${escapedName};
-      return fetch('https://pine-facade.tradingview.com/pine-facade/list/?filter=saved', { credentials: 'include' })
-        .then(function(r) { return r.json(); })
-        .then(function(scripts) {
-          if (!Array.isArray(scripts)) return {error: 'pine-facade returned unexpected data'};
-          var match = null;
-          for (var i = 0; i < scripts.length; i++) {
-            var sn = (scripts[i].scriptName || '').toLowerCase();
-            var st = (scripts[i].scriptTitle || '').toLowerCase();
-            if (sn === target || st === target) { match = scripts[i]; break; }
-          }
-          if (!match) {
-            for (var j = 0; j < scripts.length; j++) {
-              var sn2 = (scripts[j].scriptName || '').toLowerCase();
-              var st2 = (scripts[j].scriptTitle || '').toLowerCase();
-              if (sn2.indexOf(target) !== -1 || st2.indexOf(target) !== -1) { match = scripts[j]; break; }
-            }
-          }
-          if (!match) return {error: 'Script "' + target + '" not found. Use pine_list_scripts to see available scripts.'};
-
-          var id = match.scriptIdPart;
-          var ver = match.version || 1;
-          return fetch('https://pine-facade.tradingview.com/pine-facade/get/' + id + '/' + ver, { credentials: 'include' })
-            .then(function(r2) { return r2.json(); })
-            .then(function(data) {
-              var source = data.source || '';
-              if (!source) return {error: 'Script source is empty', name: match.scriptName || match.scriptTitle};
-              var m = ${FIND_MONACO};
-              if (m) {
-                m.editor.setValue(source);
-                return {success: true, name: match.scriptName || match.scriptTitle, id: id, lines: source.split('\\n').length};
-              }
-              return {error: 'Monaco editor not found to inject source', name: match.scriptName || match.scriptTitle};
-            });
-        })
-        .catch(function(e) { return {error: e.message}; });
-    })()
-  `);
-
-  if (result?.error) {
-    throw new Error(result.error);
+  const hit = resolveScriptMatch(scripts, name);
+  if (!hit) {
+    throw new Error(`Script "${name}" not found. Use pine_list_scripts to see available scripts.`);
   }
 
-  return { success: true, name: result.name, script_id: result.id, lines: result.lines, source: 'internal_api', opened: true };
+  const { script, matched_on } = hit;
+  const idLit = JSON.stringify(String(script.id));
+  const verLit = JSON.stringify(String(script.version || 1));
+
+  const result = await evaluateAsync(`
+    fetch('https://pine-facade.tradingview.com/pine-facade/get/' + ${idLit} + '/' + ${verLit}, { credentials: 'include' })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var source = data.source || '';
+        if (!source) return {error: 'Script source is empty'};
+        var m = ${FIND_MONACO};
+        if (!m) return {error: 'Monaco editor not found to inject source'};
+        m.editor.setValue(source);
+        return {success: true, lines: source.split('\\n').length};
+      })
+      .catch(function(e) { return {error: e.message}; })
+  `);
+
+  if (result?.error) throw new Error(result.error);
+
+  // The editor text is now this script's, but TradingView's save binding is
+  // unchanged. Record what the caller meant so the next save can be checked.
+  pendingOpen = { id: script.id, name: script.name || script.title, isNew: false };
+
+  return {
+    success: true,
+    name: script.name || script.title,
+    title: script.title,
+    script_id: script.id,
+    matched_on,
+    lines: result.lines,
+    source: 'internal_api',
+    opened: true,
+    warning: 'Editor text replaced, but TradingView’s save target has NOT been rebound to this script. '
+      + 'The next save is verified and will fail loudly if it lands elsewhere (issue #513).',
+  };
 }
 
 export async function listScripts() {
