@@ -93,6 +93,58 @@ export function diffScriptVersions(before, after) {
   return changed.sort((a, b) => (a.change === 'created' ? -1 : 0) - (b.change === 'created' ? -1 : 0));
 }
 
+/**
+ * The Pine Editor's title button shows the script the editor is actually
+ * BOUND to — independent of what is in the text buffer. This is the binding
+ * pine_open cannot move, so reading it lets us refuse a save before it
+ * happens rather than reporting the damage afterwards.
+ * Returns null if the control cannot be read.
+ */
+async function readBoundScriptName() {
+  const name = await evaluate(`
+    (function() {
+      var btn = document.querySelector('[class*="nameButton"]');
+      if (!btn) return null;
+      var t = (btn.textContent || '').trim();
+      return t || null;
+    })()
+  `);
+  return name || null;
+}
+
+/**
+ * Pre-flight guard. Throws before any write if the editor is bound to a
+ * different script than the caller opened. Returns the bound name when the
+ * check passes, or null when the binding could not be read (in which case
+ * verifySaveTarget still catches it after the fact).
+ */
+async function assertSaveTarget({ force = false } = {}) {
+  if (force || !pendingOpen) return null;
+
+  const bound = await readBoundScriptName();
+  if (!bound) return null;
+
+  if (pendingOpen.isNew) {
+    throw new Error(
+      `Refusing to save: pine_new only reset the editor buffer, it did not create a script. ` +
+      `The editor is still bound to "${bound}", so saving would overwrite it. ` +
+      `Use the Pine Editor's own Create new / Make a copy to create a script, or pass force:true ` +
+      `to deliberately overwrite "${bound}".`
+    );
+  }
+
+  if (pendingOpen.name && bound !== pendingOpen.name) {
+    throw new Error(
+      `Refusing to save: the editor is bound to "${bound}", not "${pendingOpen.name}". ` +
+      `pine_open replaced the editor text but TradingView keeps the save target on the previously ` +
+      `bound script, so this save would overwrite "${bound}" (issue #513). Switch scripts using the ` +
+      `editor's own Open script… dialog, or pass force:true to write to "${bound}" on purpose.`
+    );
+  }
+
+  return bound;
+}
+
 /** Snapshot the saved-script list. Returns null if it cannot be read. */
 async function fetchSavedScriptIndex() {
   const data = await evaluateAsync(`
@@ -476,6 +528,7 @@ export async function save({ force = false } = {}) {
   const editorReady = await ensurePineEditorOpen();
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
+  const boundName = await assertSaveTarget({ force });
   const before = await fetchSavedScriptIndex();
 
   const c = await getClient();
@@ -505,7 +558,7 @@ export async function save({ force = false } = {}) {
 
   const verdict = await verifySaveTarget(before, { force });
 
-  return { success: true, action: dialogHandled ? 'saved_with_dialog' : 'Ctrl+S_dispatched', ...verdict };
+  return { success: true, action: dialogHandled ? 'saved_with_dialog' : 'Ctrl+S_dispatched', bound_script: boundName, ...verdict };
 }
 
 export async function getConsole() {
@@ -563,7 +616,8 @@ export async function smartCompile({ force = false } = {}) {
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   // smartCompile clicks the editor's own Save button, so it writes to the same
-  // bound script pine_save does and needs the same verification (issue #513).
+  // bound script pine_save does and needs the same guard (issue #513).
+  const boundName = await assertSaveTarget({ force });
   const savedBefore = await fetchSavedScriptIndex();
 
   const studiesBefore = await evaluate(`
@@ -640,6 +694,7 @@ export async function smartCompile({ force = false } = {}) {
     has_errors: errors?.length > 0,
     errors: errors || [],
     study_added: studyAdded,
+    bound_script: boundName,
     ...verdict,
   };
 }
@@ -719,21 +774,33 @@ export async function openScript({ name }) {
 
   if (result?.error) throw new Error(result.error);
 
-  // The editor text is now this script's, but TradingView's save binding is
-  // unchanged. Record what the caller meant so the next save can be checked.
-  pendingOpen = { id: script.id, name: script.name || script.title, isNew: false };
+  const wanted = script.name || script.title;
+
+  // Injecting text does not move TradingView's save binding. Read the binding
+  // back so the caller is told the truth rather than being handed a script_id
+  // that implies a rebind that never happened.
+  const bound = await readBoundScriptName();
+  const boundMoved = bound !== null && bound === wanted;
+
+  // Nothing to guard against if the editor was already bound to this script.
+  pendingOpen = boundMoved ? null : { id: script.id, name: wanted, isNew: false };
 
   return {
     success: true,
-    name: script.name || script.title,
+    name: wanted,
     title: script.title,
     script_id: script.id,
     matched_on,
     lines: result.lines,
     source: 'internal_api',
     opened: true,
-    warning: 'Editor text replaced, but TradingView’s save target has NOT been rebound to this script. '
-      + 'The next save is verified and will fail loudly if it lands elsewhere (issue #513).',
+    editor_bound_to: bound,
+    save_target_moved: boundMoved,
+    ...(boundMoved ? {} : {
+      warning: `Editor text replaced, but TradingView's save target is still "${bound ?? 'unknown'}", not `
+        + `"${wanted}". Saving now would overwrite that script, so pine_save and pine_smart_compile will `
+        + 'refuse until you switch scripts with the editor\'s own Open script\u2026 dialog (issue #513).',
+    }),
   };
 }
 
