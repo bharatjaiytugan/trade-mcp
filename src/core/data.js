@@ -4,8 +4,8 @@
 import { evaluate, evaluateAsync, KNOWN_PATHS, safeString } from '../connection.js';
 import { waitForChartReady } from '../wait.js';
 
-const MAX_OHLCV_BARS = 500;
-const MAX_TRADES = 20;
+const MAX_OHLCV_BARS = 10000;
+const MAX_TRADES = 1000;
 
 // Round to 8 dp — enough to kill float noise (29899.999999997 → 29900) without
 // destroying precision on forex/crypto prices. The old 2-dp rounding flattened

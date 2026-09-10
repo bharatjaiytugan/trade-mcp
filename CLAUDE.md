@@ -117,7 +117,7 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 - Pine indicators must be **visible** on chart for pine graphics tools to read their data
 - `chart_manage_indicator` requires **full indicator names**: "Relative Strength Index" not "RSI", "Moving Average Exponential" not "EMA", "Bollinger Bands" not "BB"
 - Screenshots save to `screenshots/` directory with timestamps
-- OHLCV capped at 500 bars, trades at 20 per request
+- OHLCV capped at 10,000 bars, trades at 1,000 per request; prefer smaller requests unless full exports are needed
 - Pine labels capped at 50 per study by default (pass `max_labels` to override)
 
 ## Architecture
