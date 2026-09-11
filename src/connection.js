@@ -9,6 +9,9 @@ export const CDP_HOST = process.env.TV_CDP_HOST || process.env.CDP_HOST || '127.
 export const CDP_PORT = Number(process.env.TV_CDP_PORT || process.env.CDP_PORT) || 9222;
 const MAX_RETRIES = 5;
 const BASE_DELAY = 500;
+// Hard ceiling on a single Runtime.evaluate round-trip. A wedged renderer
+// otherwise hangs every caller forever (no CDP-level timeout exists).
+export const EVALUATE_TIMEOUT_MS = 15000;
 
 // Known direct API paths discovered via live probing (see PROBE_RESULTS.md)
 const KNOWN_PATHS = {
@@ -50,11 +53,37 @@ export function requireFinite(value, name) {
   return n;
 }
 
+/**
+ * True when `err` (or anything in its cause / AggregateError chain) is a
+ * refused TCP connection — i.e. nothing is listening on the CDP port.
+ * undici's fetch wraps the socket error as TypeError('fetch failed', { cause }),
+ * and dual-stack hosts surface an AggregateError of per-address failures.
+ */
+export function isConnectionRefused(err, depth = 0) {
+  if (!err || depth > 5) return false;
+  if (err.code === 'ECONNREFUSED') return true;
+  if (typeof err.message === 'string' && /ECONNREFUSED/.test(err.message)) return true;
+  if (err.cause && isConnectionRefused(err.cause, depth + 1)) return true;
+  if (Array.isArray(err.errors)) return err.errors.some(e => isConnectionRefused(e, depth + 1));
+  return false;
+}
+
+/** Race a promise against a timeout; rejects with `label` on expiry. */
+function withTimeout(promise, ms, label) {
+  let timer;
+  const expiry = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(label)), ms);
+  });
+  return Promise.race([promise, expiry]).finally(() => clearTimeout(timer));
+}
+
 export async function getClient() {
   if (client) {
     try {
       // Quick liveness check
-      await client.Runtime.evaluate({ expression: '1', returnByValue: true });
+      await withTimeout(
+        client.Runtime.evaluate({ expression: '1', returnByValue: true }),
+        5000, 'CDP liveness check timed out after 5s');
       return client;
     } catch {
       client = null;
@@ -68,10 +97,31 @@ export async function connect(targetId = null) {
   let lastError;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      const target = targetId ? await findTargetById(targetId) : await findChartTarget();
+      // TV_TARGET_ID is the only pin that survives the CLI's process model: every
+      // `tv` call is a fresh node process, so the module-level client/targetInfo
+      // above die with it, and tab_switch holds only for the long-lived MCP server.
+      // Export it once per shell and every later command follows that tab.
+      //
+      // Why it exists: the chart window is SHARED. Confirmed 2026-09-04 - three
+      // consecutive reads for one ticker returned three different companies because
+      // a second agent moved the chart between the write and the read.
+      const pinned = targetId || process.env.TV_TARGET_ID || null;
+      const target = pinned ? await findTargetById(pinned) : await findChartTarget();
+      if (!target && pinned) {
+        // A missing pinned target is a settled fact, not a transient fault. Retrying
+        // it five times with exponential backoff just makes the user wait ~30s for an
+        // answer that was already known on attempt one.
+        throw Object.assign(new Error(
+          `CDP target ${pinned} not found - the pinned tab was closed, or TradingView `
+          + `restarted. Run "tv tab list" and re-export TV_TARGET_ID, or unset it.`),
+          { fatal: true });
+      }
       if (!target) {
-        throw new Error(targetId
-          ? `CDP target ${targetId} not found — is the tab still open?`
+        // A pin that has gone missing must FAIL, never fall back to whatever chart
+        // is first - that would silently restore the collision the pin prevents.
+        throw new Error(pinned
+          ? `CDP target ${pinned} not found - the pinned tab was closed, or TradingView restarted. `
+            + `Run "tv tab list" and re-export TV_TARGET_ID, or unset it to use the first chart tab.`
           : 'No TradingView chart target found. Is TradingView open with a chart?');
       }
       targetInfo = target;
@@ -84,6 +134,16 @@ export async function connect(targetId = null) {
 
       return client;
     } catch (err) {
+      if (err.fatal) throw err;   // no point retrying a target that does not exist
+      if (isConnectionRefused(err)) {
+        // Nothing is listening on the CDP port. That is a settled fact, not a
+        // transient fault — retrying with backoff only delays the answer ~15s.
+        throw Object.assign(new Error(
+          `TradingView is not reachable: connection refused at ${CDP_HOST}:${CDP_PORT} (ECONNREFUSED). `
+          + `TradingView Desktop is not running with --remote-debugging-port=${CDP_PORT}. `
+          + `Run "tv launch" (or the tv_launch tool) to start it.`),
+          { fatal: true, code: 'ECONNREFUSED' });
+      }
       lastError = err;
       const delay = Math.min(BASE_DELAY * Math.pow(2, attempt), 30000);
       await new Promise(r => setTimeout(r, delay));
@@ -110,10 +170,22 @@ export async function reconnectTo(targetId) {
 async function findChartTarget() {
   const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
   const targets = await resp.json();
-  // Prefer targets with tradingview.com/chart in the URL
-  return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
-    || targets.find(t => t.type === 'page' && /tradingview/i.test(t.url))
-    || null;
+  const chart = targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url));
+  if (chart) return chart;
+
+  // The old fallback accepted ANY tradingview URL. With no chart open it attached
+  // to an options-chain or screener page and every later read failed in a way that
+  // looked like a data problem rather than a wrong-target problem.
+  const other = targets.find(t => t.type === 'page' && /tradingview/i.test(t.url));
+  if (other) {
+    // The app is up and showing a non-chart page. That does not fix itself
+    // within a retry window, so fail immediately rather than after 5 backoffs.
+    throw Object.assign(new Error(
+      `No TradingView CHART tab is open. The only TradingView page found is `
+      + `"${(other.title || other.url || '').slice(0, 60)}", which has no chart API. `
+      + `Open a chart tab, or pin one with TV_TARGET_ID.`), { fatal: true });
+  }
+  return null;
 }
 
 async function findTargetById(id) {
@@ -131,12 +203,16 @@ export async function getTargetInfo() {
 
 export async function evaluate(expression, opts = {}) {
   const c = await getClient();
-  const result = await c.Runtime.evaluate({
-    expression,
-    returnByValue: true,
-    awaitPromise: opts.awaitPromise ?? false,
-    ...opts,
-  });
+  const { timeoutMs = EVALUATE_TIMEOUT_MS, ...cdpOpts } = opts;
+  const result = await withTimeout(
+    c.Runtime.evaluate({
+      expression,
+      returnByValue: true,
+      awaitPromise: cdpOpts.awaitPromise ?? false,
+      ...cdpOpts,
+    }),
+    timeoutMs,
+    `CDP evaluate timed out after ${Math.round(timeoutMs / 1000)}s — the TradingView renderer did not respond`);
   if (result.exceptionDetails) {
     const msg = result.exceptionDetails.exception?.description
       || result.exceptionDetails.text

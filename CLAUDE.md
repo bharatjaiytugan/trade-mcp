@@ -117,7 +117,10 @@ These tools can return large payloads. Follow these rules to avoid context bloat
 - Pine indicators must be **visible** on chart for pine graphics tools to read their data
 - `chart_manage_indicator` requires **full indicator names**: "Relative Strength Index" not "RSI", "Moving Average Exponential" not "EMA", "Bollinger Bands" not "BB"
 - Screenshots save to `screenshots/` directory with timestamps
-- OHLCV capped at 500 bars, trades at 20 per request
+- OHLCV capped at 500 bars, trades at 20 per request; `data_get_ohlcv` pages history in via the feed until `count` bars are loaded and reports `requested` / `bar_count` / `total_available` / `truncated`
+- The chart is **shared**. `chart_set_symbol` / `chart_set_timeframe` succeed only when the chart API confirms the new symbol/resolution with a settled bar series (`confirmed: true`, `chart_symbol`, `chart_resolution`); after 10s without confirmation they fail with `chart did not confirm symbol X within 10s; chart shows Y`. Symbols are compared by ticker (`CIFR` matches `BATS:CIFR`)
+- `quote_get` with a `symbol` that differs from the chart is refused unless `force_switch: true` (switch, read, restore). Prefer `chart_set_symbol` then `quote_get` with no symbol
+- `tv_health_check` returns `cdp_connected: false` + `error` when TradingView is down; pass `check_update: true` for the GitHub version comparison (off by default)
 - Pine labels capped at 50 per study by default (pass `max_labels` to override)
 
 ## Architecture

@@ -3,8 +3,8 @@ import { jsonResult } from './_format.js';
 import * as core from '../core/data.js';
 
 export function registerDataTools(server) {
-  server.tool('data_get_ohlcv', 'Get OHLCV bar data from the chart. Use summary=true for compact stats instead of all bars (saves context).', {
-    count: z.coerce.number().optional().describe('Number of bars to retrieve (max 500, default 100)'),
+  server.tool('data_get_ohlcv', 'Get OHLCV bar data from the chart. Pages history in until `count` bars are loaded or the feed runs out; result reports symbol, resolution, requested, bar_count, total_available, truncated. Use summary=true for compact stats instead of all bars (saves context).', {
+    count: z.coerce.number().optional().describe('Number of bars to retrieve (max 500, default 100). History is paged in as needed.'),
     summary: z.coerce.boolean().optional().describe('Return summary stats (high, low, open, close, avg volume, range) instead of all bars — much smaller output'),
   }, async ({ count, summary }) => {
     try { return jsonResult(await core.getOhlcv({ count, summary })); }
@@ -35,10 +35,11 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('quote_get', 'Get real-time quote data for a symbol (price, OHLC, volume). If symbol is provided and differs from the current chart, the chart is briefly switched to fetch the quote and then restored — adds ~1-2s and serializes parallel calls.', {
-    symbol: z.string().optional().describe('Symbol to quote (blank = current chart symbol). Non-blank values cause a chart switch + restore.'),
-  }, async ({ symbol }) => {
-    try { return jsonResult(await core.getQuote({ symbol })); }
+  server.tool('quote_get', 'Get real-time quote data for a symbol (price, OHLC, volume). The chart is SHARED: if symbol differs from the current chart symbol the call is refused unless force_switch=true, in which case the chart is briefly switched, read, and restored (adds ~1-2s, serializes parallel calls). Prefer chart_set_symbol first, then quote_get with no symbol.', {
+    symbol: z.string().optional().describe('Symbol to quote (blank = current chart symbol). A different symbol is refused unless force_switch is true.'),
+    force_switch: z.coerce.boolean().optional().describe('Allow switching the shared chart to `symbol` for the read and restoring it afterwards (default false).'),
+  }, async ({ symbol, force_switch }) => {
+    try { return jsonResult(await core.getQuote({ symbol, force_switch })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 

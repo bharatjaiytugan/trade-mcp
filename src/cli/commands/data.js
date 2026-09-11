@@ -2,14 +2,17 @@ import { register } from '../router.js';
 import * as core from '../../core/data.js';
 
 register('quote', {
-  description: 'Get real-time price quote',
-  handler: (opts, positionals) => core.getQuote({ symbol: positionals[0] }),
+  description: 'Get real-time price quote. "tv quote SYM" on a chart showing another symbol is refused unless --force-switch (the chart is shared)',
+  options: {
+    'force-switch': { type: 'boolean', description: 'Allow switching the shared chart to SYM for the read, then restoring it. Without it, quote SYM is refused when the chart shows a different symbol' },
+  },
+  handler: (opts, positionals) => core.getQuote({ symbol: positionals[0], force_switch: !!opts['force-switch'] }),
 });
 
 register('ohlcv', {
   description: 'Get OHLCV bar data',
   options: {
-    count: { type: 'string', short: 'n', description: 'Number of bars (default 100, max 500)' },
+    count: { type: 'string', short: 'n', description: 'Number of bars (default 100, max 500). History is paged in until count bars are loaded or the feed runs out; output reports requested/bar_count/truncated' },
     summary: { type: 'boolean', short: 's', description: 'Return summary stats instead of all bars' },
   },
   handler: (opts) => core.getOhlcv({

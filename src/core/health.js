@@ -42,9 +42,23 @@ async function checkForUpdate() {
   return value;
 }
 
-export async function healthCheck() {
-  await getClient();
-  const target = await getTargetInfo();
+export async function healthCheck({ check_update } = {}) {
+  let target;
+  try {
+    await getClient();
+    target = await getTargetInfo();
+  } catch (err) {
+    // "Is TradingView reachable?" is the question — a refused connection is a
+    // valid answer, not a crash. Report it as data.
+    return {
+      success: false,
+      cdp_connected: false,
+      cdp_url: `http://${CDP_HOST}:${CDP_PORT}`,
+      error: err.message,
+      hint: `TradingView is not reachable at ${CDP_HOST}:${CDP_PORT}. Run "tv launch" (or the tv_launch tool), `
+        + `or start TradingView Desktop with --remote-debugging-port=${CDP_PORT}.`,
+    };
+  }
 
   const state = await evaluate(`
     (function() {
@@ -66,7 +80,13 @@ export async function healthCheck() {
     })()
   `);
 
-  const update = await checkForUpdate();
+  // GitHub version check is opt-in: it is a network call to api.github.com on
+  // every status probe otherwise, and a health check must not depend on it.
+  let update;
+  if (check_update) {
+    update = (await checkForUpdate())
+      || { update_available: null, note: 'update check unavailable (offline, not a git checkout, or GitHub unreachable)' };
+  }
 
   return {
     success: true,

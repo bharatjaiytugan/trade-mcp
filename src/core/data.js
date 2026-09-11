@@ -2,10 +2,27 @@
  * Core data access logic.
  */
 import { evaluate, evaluateAsync, KNOWN_PATHS, safeString } from '../connection.js';
-import { waitForChartReady } from '../wait.js';
+import { waitForChartReady as _waitForChartReady, symbolMatches, DEFAULT_TIMEOUT as READY_TIMEOUT_MS } from '../wait.js';
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
+// History paging for getOhlcv — same requestMoreData mechanism as
+// chart.setVisibleRange: one page pulls up to 1000 more bars from the feed and
+// needs a moment to land before the series reports them.
+const OHLCV_PAGE_SIZE = 1000;
+const OHLCV_MAX_PAGES = 25;
+const OHLCV_PAGE_SETTLE_MS = 1800;
+const READY_TIMEOUT_S = Math.round(READY_TIMEOUT_MS / 1000);
+
+// Injectable deps (unit tests pass `_deps`); production uses the real CDP bridge.
+function _resolve(deps) {
+  return {
+    evaluate: deps?.evaluate || evaluate,
+    evaluateAsync: deps?.evaluateAsync || evaluateAsync,
+    waitForChartReady: deps?.waitForChartReady || _waitForChartReady,
+    delay: deps?.delay || ((ms) => new Promise(r => setTimeout(r, ms))),
+  };
+}
 
 // Round to 8 dp — enough to kill float noise (29899.999999997 → 29900) without
 // destroying precision on forex/crypto prices. The old 2-dp rounding flattened
@@ -134,12 +151,40 @@ function buildGraphicsJS(collectionName, mapKey, filter) {
   `;
 }
 
-export async function getOhlcv({ count, summary } = {}) {
-  const limit = Math.min(count || 100, MAX_OHLCV_BARS);
+export async function getOhlcv({ count, summary, _deps } = {}) {
+  const { evaluate, delay } = _resolve(_deps);
+  const requested = Math.max(1, Math.floor(Number(count) || 100));
+  const limit = Math.min(requested, MAX_OHLCV_BARS);
+
+  // The chart lazy-loads history (~300 bars at first). Page back through the
+  // feed until `limit` bars are loaded, the feed reports no more, a page adds
+  // nothing, or the page guard trips — otherwise a 500-bar request silently
+  // returned whatever happened to be loaded.
+  let pages = 0;
+  let lastSize = -1;
+  for (let i = 0; i < OHLCV_MAX_PAGES; i++) {
+    let state = null;
+    try {
+      state = await evaluate(`(function() {
+        try {
+          var ms = ${CHART_API}._chartWidget.model().mainSeries();
+          var more = true; try { more = ms.requestMoreDataAvailable(); } catch (e) {}
+          return { size: ms.bars().size(), more: more };
+        } catch (e) { return null; }
+      })()`);
+    } catch { state = null; }
+    if (!state || state.size >= limit || !state.more || state.size === lastSize) break;
+    lastSize = state.size;
+    await evaluate(`(function() { try { ${CHART_API}._chartWidget.model().mainSeries().requestMoreData(${OHLCV_PAGE_SIZE}); } catch (e) {} })()`);
+    pages++;
+    await delay(OHLCV_PAGE_SETTLE_MS);
+  }
+
   let data;
   try {
     data = await evaluate(`
       (function() {
+        var chart = ${CHART_API};
         var bars = ${BARS_PATH};
         if (!bars || typeof bars.lastIndex !== 'function') return null;
         var result = [];
@@ -149,7 +194,9 @@ export async function getOhlcv({ count, summary } = {}) {
           var v = bars.valueAt(i);
           if (v) result.push({time: v[0], open: v[1], high: v[2], low: v[3], close: v[4], volume: v[5] || 0});
         }
-        return {bars: result, total_bars: bars.size(), source: 'direct_bars'};
+        var symbol = null, resolution = null;
+        try { symbol = chart.symbol(); resolution = chart.resolution(); } catch (e) {}
+        return {bars: result, total_bars: bars.size(), symbol: symbol, resolution: resolution, source: 'direct_bars'};
       })()
     `);
   } catch { data = null; }
@@ -157,6 +204,17 @@ export async function getOhlcv({ count, summary } = {}) {
   if (!data || !data.bars || data.bars.length === 0) {
     throw new Error('Could not extract OHLCV data. The chart may still be loading.');
   }
+
+  const meta = {
+    symbol: data.symbol ?? null,
+    resolution: data.resolution ?? null,
+    requested,
+    bar_count: data.bars.length,
+    total_available: data.total_bars,
+    truncated: data.bars.length < requested,
+    pages_loaded: pages,
+    ...(requested > MAX_OHLCV_BARS && { note: `count capped at ${MAX_OHLCV_BARS} bars per call` }),
+  };
 
   if (summary) {
     const bars = data.bars;
@@ -166,7 +224,7 @@ export async function getOhlcv({ count, summary } = {}) {
     const first = bars[0];
     const last = bars[bars.length - 1];
     return {
-      success: true, bar_count: bars.length,
+      success: true, ...meta,
       period: { from: first.time, to: last.time },
       open: first.open, close: last.close,
       high: Math.max(...highs), low: Math.min(...lows),
@@ -178,7 +236,7 @@ export async function getOhlcv({ count, summary } = {}) {
     };
   }
 
-  return { success: true, bar_count: data.bars.length, total_available: data.total_bars, source: data.source, bars: data.bars };
+  return { success: true, ...meta, source: data.source, bars: data.bars };
 }
 
 export async function getIndicator({ entity_id }) {
@@ -367,24 +425,42 @@ export async function getEquity() {
   };
 }
 
-export async function getQuote({ symbol } = {}) {
+export async function getQuote({ symbol, force_switch, _deps } = {}) {
   // Serialize: chained on _quoteLock so parallel callers run one after another.
   // Catch on the lock chain prevents a single failure from poisoning the chain.
-  const run = _quoteLock.then(() => _getQuoteInternal({ symbol }));
+  const run = _quoteLock.then(() => _getQuoteInternal({ symbol, force_switch, _deps }));
   _quoteLock = run.then(() => {}, () => {});
   return run;
 }
 
-async function _getQuoteInternal({ symbol } = {}) {
+async function _getQuoteInternal({ symbol, force_switch, _deps } = {}) {
+  const { evaluate, evaluateAsync, waitForChartReady } = _resolve(_deps);
   const requested = (symbol || '').toString().trim();
   let originalSymbol = null;
   let needsRestore = false;
 
   if (requested) {
-    try { originalSymbol = await evaluate(`${CHART_API}.symbol()`); } catch (e) {}
-    const bare = (s) => (s || '').toString().split(':').pop().toUpperCase();
-    if (bare(originalSymbol) !== bare(requested)) {
+    // Not swallowed: if the chart cannot even be asked what it shows, that is a
+    // connection failure to surface, not a reason to refuse or to switch.
+    originalSymbol = await evaluate(`${CHART_API}.symbol()`);
+    if (!symbolMatches(requested, originalSymbol)) {
+      // The chart window is shared. Moving it to quote a different symbol
+      // pulls the chart out from under any other reader (confirmed 2026-09-04:
+      // three reads of one ticker returned three companies). Refuse unless the
+      // caller explicitly accepts the switch-and-restore.
+      if (!force_switch) {
+        throw new Error(
+          `quote ${requested}: the shared chart is on ${originalSymbol || 'unknown'}, not ${requested}. `
+          + `Switching it would move the chart under any other reader (shared-chart collision). `
+          + `Run "tv symbol ${requested}" first, or pass --force-switch (CLI) / force_switch=true (MCP) `
+          + `to switch, quote, and restore.`);
+      }
       needsRestore = true;
+    }
+  }
+
+  try {
+    if (needsRestore) {
       await evaluateAsync(`
         (function() {
           var chart = ${CHART_API};
@@ -394,11 +470,14 @@ async function _getQuoteInternal({ symbol } = {}) {
           });
         })()
       `);
-      await waitForChartReady(requested);
+      const confirmed = await waitForChartReady(requested, null, READY_TIMEOUT_MS);
+      if (!confirmed) {
+        let shown = 'unknown';
+        try { shown = (await evaluate(`${CHART_API}.symbol()`)) || 'unknown'; } catch { /* report what we have */ }
+        throw new Error(`chart did not confirm symbol ${requested} within ${READY_TIMEOUT_S}s; chart shows ${shown}`);
+      }
     }
-  }
 
-  try {
     const data = await evaluate(`
       (function() {
         var api = ${CHART_API};
@@ -430,7 +509,7 @@ async function _getQuoteInternal({ symbol } = {}) {
       })()
     `);
     if (!data || (!data.last && !data.close)) throw new Error('Could not retrieve quote. The chart may still be loading.');
-    return { success: true, ...data };
+    return { success: true, ...data, ...(needsRestore && { switched_from: originalSymbol, restored: true }) };
   } finally {
     if (needsRestore && originalSymbol) {
       try {
@@ -443,8 +522,8 @@ async function _getQuoteInternal({ symbol } = {}) {
             });
           })()
         `);
-        await waitForChartReady(originalSymbol);
-      } catch (e) {}
+        await waitForChartReady(originalSymbol, null, READY_TIMEOUT_MS);
+      } catch { /* best-effort restore */ }
     }
   }
 }

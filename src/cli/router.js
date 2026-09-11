@@ -50,8 +50,43 @@ function printCommandHelp(name, cmd) {
   }
 }
 
+/**
+ * Pull the global `--tab <id>` / `--tab=<id>` flag out of an argv slice.
+ * Returns { args, tabId, error }: `args` with the flag removed, `tabId` (null
+ * when absent), `error` set when the flag was given without a value.
+ * Pure — exported for unit tests.
+ */
+export function extractTabFlag(argv) {
+  const args = [...argv];
+  const tabAt = args.findIndex(a => a === '--tab' || a.startsWith('--tab='));
+  if (tabAt === -1) return { args, tabId: null, error: null };
+  const inline = args[tabAt].startsWith('--tab=');
+  const id = inline ? args[tabAt].slice(6) : args[tabAt + 1];
+  if (!id || (!inline && id.startsWith('-'))) {
+    return { args, tabId: null, error: '--tab requires a CDP target id. Run "tv tab list" to see them.' };
+  }
+  args.splice(tabAt, inline ? 1 : 2);
+  return { args, tabId: id, error: null };
+}
+
+// Messages that mean "could not talk to a TradingView chart" — exit code 2, so
+// scripts can tell a dead/absent TradingView from a bad command.
+const CONNECTION_FAILURE_RE = /CDP|connection|ECONNREFUSED|not running|not reachable|No TradingView (CHART tab|chart target)/i;
+
+export function isConnectionFailure(message) {
+  return CONNECTION_FAILURE_RE.test(String(message || ''));
+}
+
 export async function run(argv) {
-  const args = argv.slice(2);
+  // Global --tab <id>: pin this one call to a CDP target, then strip it so no
+  // individual command ever sees it. Same effect as exporting TV_TARGET_ID, for
+  // a single invocation.
+  const { args, tabId, error: tabError } = extractTabFlag(argv.slice(2));
+  if (tabError) {
+    console.error(tabError);
+    process.exit(1);
+  }
+  if (tabId) process.env.TV_TARGET_ID = tabId;
 
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
     printHelp();
@@ -141,7 +176,7 @@ async function execute(handler, values, positionals) {
 function handleError(err) {
   const message = err.message || String(err);
   // Connection failures get exit code 2
-  if (/CDP|connection|ECONNREFUSED|not running/i.test(message)) {
+  if (isConnectionFailure(message)) {
     console.error(JSON.stringify({ success: false, error: message }, null, 2));
     process.exit(2);
   }

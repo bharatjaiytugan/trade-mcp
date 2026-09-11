@@ -31,7 +31,10 @@ export async function batchRun({ symbols, timeframes, action, delay_ms, ohlcv_co
           else if (apiPath) await evaluate(`${apiPath}.setResolution(${safeString(tf)})`);
         }
 
-        await waitForChartReady(symbol);
+        // A false here means the chart never confirmed this symbol/timeframe;
+        // record the combo as failed rather than reading whatever is on screen.
+        const confirmed = await waitForChartReady(symbol, tf || null);
+        if (!confirmed) throw new Error(`chart did not confirm ${symbol}${tf ? ' @ ' + tf : ''}; skipped`);
         await new Promise(r => setTimeout(r, delay));
 
         let actionResult;
