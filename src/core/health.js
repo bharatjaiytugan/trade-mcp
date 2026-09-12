@@ -228,7 +228,11 @@ async function _probeCdp(cdpPort) {
 }
 
 function _spawnDetached(spawnFn, exe, args) {
-  const child = spawnFn(exe, args, { detached: true, stdio: 'ignore' });
+  // An Electron parent (e.g. the VS Code extension host, which commonly hosts MCP
+  // clients) exports ELECTRON_RUN_AS_NODE=1. Inherited, it makes TradingView boot
+  // as a plain Node runtime, which rejects --remote-debugging-port as a bad option.
+  const { ELECTRON_RUN_AS_NODE, ...env } = process.env;
+  const child = spawnFn(exe, args, { detached: true, stdio: 'ignore', env });
   child.unref();
   return child;
 }
@@ -393,8 +397,10 @@ export async function launch({ port, kill_existing, _deps } = {}) {
     };
   }
 
+  // CDP never bound. Report that as a failure: a caller checking only `success`
+  // would otherwise treat a dead launch as a pass.
   return {
-    success: true, platform, binary: tvPath, pid: child.pid, cdp_port: cdpPort, cdp_ready: false,
+    success: false, platform, binary: tvPath, pid: child.pid, cdp_port: cdpPort, cdp_ready: false,
     ...(usedLocalCopy && { msix_local_copy: true }),
     warning: 'TradingView launched but CDP not responding yet. It may still be loading. Try tv_health_check in a few seconds.',
   };
