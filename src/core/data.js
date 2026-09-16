@@ -535,6 +535,68 @@ export async function getStudyValues() {
   return { success: true, study_count: data?.length || 0, studies: data || [] };
 }
 
+/**
+ * Read horizontal price levels published by NATIVE (non-Pine) studies — the
+ * Volume Profile family's POC / VAH / VAL, session levels, etc. These live in
+ * `_primitivesCollection.horizlines`, a Map keyed by style id ("pocLines",
+ * "vahLines", "valLines") whose values hold `_primitivesDataById` directly —
+ * one layer shallower than the Pine `dwglines` path buildGraphicsJS walks, so
+ * data_get_pine_lines never sees them. The `level` field is the raw price;
+ * the price-axis label is this value rounded to the symbol's tick.
+ */
+export async function getStudyLevels({ study_filter, verbose, _deps } = {}) {
+  const ev = _deps?.evaluate || evaluate;
+  const filter = study_filter || '';
+  const raw = await ev(`
+    (function() {
+      var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+      var sources = chart.model().model().dataSources();
+      var results = [];
+      var filter = ${safeString(filter)};
+      for (var si = 0; si < sources.length; si++) {
+        var s = sources[si];
+        if (!s.metaInfo) continue;
+        try {
+          var meta = s.metaInfo();
+          var name = meta.description || meta.shortDescription || '';
+          if (!name) continue;
+          if (filter && name.indexOf(filter) === -1) continue;
+          var pc = s._graphics && s._graphics._primitivesCollection;
+          var hl = pc && pc.horizlines;
+          if (!hl || typeof hl.forEach !== 'function') continue;
+          var levels = [];
+          hl.forEach(function(coll, styleId) {
+            var byId = coll && coll._primitivesDataById;
+            if (!byId || typeof byId.forEach !== 'function') return;
+            byId.forEach(function(v, id) {
+              if (!v || typeof v.level !== 'number') return;
+              levels.push({ style_id: String(styleId), primitive_id: id, level: v.level, start_index: v.startIndex, end_index: v.endIndex });
+            });
+          });
+          if (levels.length === 0) continue;
+          var id = null;
+          try { id = s.id ? s.id() : null; } catch(e) {}
+          results.push({ id: id, name: name, levels: levels });
+        } catch(e) {}
+      }
+      return results;
+    })()
+  `);
+  if (!raw || raw.length === 0) return { success: true, study_count: 0, studies: [] };
+
+  const studies = raw.map((s) => {
+    const levels = {};
+    for (const p of s.levels) {
+      if (!levels[p.style_id]) levels[p.style_id] = [];
+      levels[p.style_id].push(roundPrice(p.level));
+    }
+    const out = { id: s.id, name: s.name, levels };
+    if (verbose) out.primitives = s.levels.map((p) => ({ style_id: p.style_id, primitive_id: p.primitive_id, level: roundPrice(p.level), start_index: p.start_index, end_index: p.end_index }));
+    return out;
+  });
+  return { success: true, study_count: studies.length, studies };
+}
+
 export async function getPineLines({ study_filter, verbose } = {}) {
   const filter = study_filter || '';
   const raw = await evaluate(buildGraphicsJS('dwglines', 'lines', filter));

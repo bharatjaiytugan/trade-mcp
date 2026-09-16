@@ -55,6 +55,14 @@ export function registerDataTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  server.tool('data_get_study_levels', 'Read horizontal price levels published by NATIVE (non-Pine) studies — Volume Profile POC/VAH/VAL, session levels, etc. — as raw numbers keyed by style id (pocLines/vahLines/valLines). This is the numeric source the price-axis labels are rounded from; data_get_pine_lines cannot see these. Use study_filter to target one indicator (e.g. "Volume Profile").', {
+    study_filter: z.string().optional().describe('Substring to match study name (e.g., "Volume Profile"). Omit for all.'),
+    verbose: z.coerce.boolean().optional().describe('Also return each primitive with its bar-index span (default false)'),
+  }, async ({ study_filter, verbose }) => {
+    try { return jsonResult(await core.getStudyLevels({ study_filter, verbose })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   server.tool('data_get_pine_labels', 'Read text labels drawn by Pine Script indicators (label.new). Returns text and price pairs. Use study_filter to target a specific indicator.', {
     study_filter: z.string().optional().describe('Substring to match study name. Omit for all.'),
     max_labels: z.coerce.number().optional().describe('Max labels per study (default 50). Set higher if you need all.'),

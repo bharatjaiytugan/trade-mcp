@@ -34,6 +34,14 @@ register('data', {
       },
       handler: (opts) => core.getPineLines({ study_filter: opts.filter, verbose: opts.verbose }),
     }],
+    ['levels', {
+      description: 'Get native-study horizontal levels (Volume Profile POC/VAH/VAL) as raw numbers',
+      options: {
+        filter: { type: 'string', short: 'f', description: 'Filter by study name substring' },
+        verbose: { type: 'boolean', short: 'v', description: 'Include each primitive with its bar-index span' },
+      },
+      handler: (opts) => core.getStudyLevels({ study_filter: opts.filter, verbose: opts.verbose }),
+    }],
     ['labels', {
       description: 'Get Pine Script label.new() annotations',
       options: {

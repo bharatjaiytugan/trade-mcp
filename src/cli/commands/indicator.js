@@ -4,7 +4,7 @@ import * as indCore from '../../core/indicators.js';
 import * as dataCore from '../../core/data.js';
 
 register('indicator', {
-  description: 'Indicator tools (add, remove, toggle, set, get)',
+  description: 'Indicator tools (add, remove, toggle, set, get, style, set-style)',
   subcommands: new Map([
     ['add', {
       description: 'Add an indicator to the chart',
@@ -44,6 +44,24 @@ register('indicator', {
         if (!positionals[0]) throw new Error('Entity ID required. Usage: tv indicator set eFu1Ot -i \'{"in_3": 20}\'');
         if (!opts.inputs) throw new Error('Inputs required. Usage: tv indicator set eFu1Ot -i \'{"in_3": 20}\'');
         return indCore.setInputs({ entity_id: positionals[0], inputs: opts.inputs });
+      },
+    }],
+    ['style', {
+      description: 'Read indicator style tree (styles.* plots, graphics.* native drawings)',
+      handler: (opts, positionals) => {
+        if (!positionals[0]) throw new Error('Entity ID required. Usage: tv indicator style eFu1Ot');
+        return indCore.getStyle({ entity_id: positionals[0] });
+      },
+    }],
+    ['set-style', {
+      description: 'Change indicator style properties (colors, line visibility, widths)',
+      options: {
+        overrides: { type: 'string', short: 'o', description: 'JSON dotted style overrides, e.g. \'{"graphics.horizlines.pocLines.color": "#FFC107"}\'' },
+      },
+      handler: (opts, positionals) => {
+        if (!positionals[0]) throw new Error('Entity ID required. Usage: tv indicator set-style eFu1Ot -o \'{"graphics.horizlines.vahLines.visible": true}\'');
+        if (!opts.overrides) throw new Error('Overrides required. Usage: tv indicator set-style eFu1Ot -o \'{"graphics.horizlines.vahLines.visible": true}\'');
+        return indCore.setStyle({ entity_id: positionals[0], overrides: opts.overrides });
       },
     }],
     ['get', {

@@ -19,6 +19,21 @@ export function registerIndicatorTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
+  server.tool('indicator_get_style', 'Read an indicator/study style tree: plot styles under styles.* and native drawing styles under graphics.* (e.g. Volume Profile POC/VAH/VAL lines, histogram width/colors). The dotted keys returned are what indicator_set_style accepts.', {
+    entity_id: z.string().describe('Entity ID of the study (from chart_get_state)'),
+  }, async ({ entity_id }) => {
+    try { return jsonResult(await core.getStyle({ entity_id })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
+  server.tool('indicator_set_style', 'Change indicator/study STYLE properties (colors, line visibility, widths) — the Style tab, not the Inputs tab. Keys are dotted paths from indicator_get_style, e.g. \'{"graphics.horizlines.pocLines.color": "#FFC107", "graphics.horizlines.vahLines.visible": true, "graphics.hhists.histBars2.percentWidth": 18, "styles.developingVAHigh.visible": true}\'. Every key is read back; success is true only when all keys took.', {
+    entity_id: z.string().describe('Entity ID of the study (from chart_get_state)'),
+    overrides: z.string().describe('JSON string of dotted style overrides'),
+  }, async ({ entity_id, overrides }) => {
+    try { return jsonResult(await core.setStyle({ entity_id, overrides })); }
+    catch (err) { return jsonResult({ success: false, error: err.message }, true); }
+  });
+
   server.tool('indicator_search', 'Search TradingView\'s Indicators dialog for indicators, strategies, and community/public scripts by keyword. Returns matching titles grouped by section (Technicals, Community, My scripts, etc.).', {
     query: z.string().describe('Search keyword, e.g. "RSI", "supertrend", "order block"'),
     limit: z.coerce.number().optional().describe('Max results to return (default 25)'),
