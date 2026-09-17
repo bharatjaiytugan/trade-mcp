@@ -1,7 +1,12 @@
 node_modules/
+.venv/
+__pycache__/
 screenshots/
+scripts/idx-daily-screener/data_cache/
 scripts/current.pine
 temp_*
 *.log
 discovery-log.json
 rules.json
+.DS_Store
+.claude/worktrees/
