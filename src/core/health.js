@@ -360,21 +360,41 @@ export async function launch({ port, kill_existing, _deps } = {}) {
   if (killFirst) await killExisting();
 
   const cdpArgs = [`--remote-debugging-port=${cdpPort}`];
-  let child = _spawnDetached(deps.spawn, tvPath, cdpArgs);
+  const isMsixPath = platform === 'win32' && WINDOWS_APPS_RE.test(tvPath);
+
+  // spawn() can fail two ways: asynchronously (an 'error' event, handled by
+  // _spawnFailedEarly below) or *synchronously* — e.g. EPERM when spawning an
+  // exe directly out of WindowsApps on some builds. A sync throw here used to
+  // crash launch() before it ever reached the WindowsApps fallback logic, so
+  // on the MSIX path we catch it and treat it the same as an early failure.
+  let child;
+  let syncSpawnError = null;
+  try {
+    child = _spawnDetached(deps.spawn, tvPath, cdpArgs);
+  } catch (e) {
+    if (!isMsixPath) throw e;
+    syncSpawnError = e.code || e.message || 'spawn error';
+  }
+
   let info = null;
   let usedLocalCopy = false;
 
-  if (platform === 'win32' && WINDOWS_APPS_RE.test(tvPath)) {
-    const earlyFailure = await _spawnFailedEarly(child);
+  if (isMsixPath) {
+    const earlyFailure = syncSpawnError || (await _spawnFailedEarly(child));
     if (!earlyFailure) {
       info = await _waitForCdp({ cdpPort, attempts: 15, delay: deps.delay, probeCdp: deps.probeCdp });
     }
     if (!info) {
-      // Direct WindowsApps launch was blocked or CDP never bound — fall back to
-      // a local copy of the package (see _copyMsixPackageLocal).
+      // Direct WindowsApps launch was blocked (sync/async spawn error) or CDP
+      // never bound — fall back to a local copy of the package (see
+      // _copyMsixPackageLocal). The copy has already lost its MSIX package
+      // identity/AppContainer, which is what a WindowsApps launch's sandboxed
+      // GPU process depends on — without --no-sandbox it reliably crashes
+      // with "GPU process isn't usable". Since the sandboxing guarantee is
+      // already gone for this copy, disable it explicitly rather than crash.
       const localExe = _copyMsixPackageLocal(tvPath, deps);
       await killExisting();
-      child = _spawnDetached(deps.spawn, localExe, cdpArgs);
+      child = _spawnDetached(deps.spawn, localExe, [...cdpArgs, '--no-sandbox', '--disable-gpu']);
       tvPath = localExe;
       usedLocalCopy = true;
     }
@@ -389,13 +409,13 @@ export async function launch({ port, kill_existing, _deps } = {}) {
       success: true, platform, binary: tvPath, pid: child.pid,
       cdp_port: cdpPort, cdp_url: `http://${CDP_HOST}:${cdpPort}`,
       browser: info.Browser, user_agent: info['User-Agent'],
-      ...(usedLocalCopy && { msix_local_copy: true }),
+      ...(usedLocalCopy && { msix_local_copy: true, sandbox_disabled: true }),
     };
   }
 
   return {
     success: true, platform, binary: tvPath, pid: child.pid, cdp_port: cdpPort, cdp_ready: false,
-    ...(usedLocalCopy && { msix_local_copy: true }),
+    ...(usedLocalCopy && { msix_local_copy: true, sandbox_disabled: true }),
     warning: 'TradingView launched but CDP not responding yet. It may still be loading. Try tv_health_check in a few seconds.',
   };
 }
