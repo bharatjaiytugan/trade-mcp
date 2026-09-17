@@ -29,8 +29,8 @@ function mockChild({ failWith } = {}) {
  *   cdpBindsFor  — spawn paths (substring) after which probeCdp starts succeeding
  *   copyExists   — local copy already present
  */
-function msixDeps({ spawnFailures = [], cdpBindsFor = [], copyExists = false } = {}) {
-  const state = { spawned: [], copies: [], removed: [], killed: 0, cdpUp: false };
+function msixDeps({ spawnFailures = [], spawnThrowsSyncFor = [], cdpBindsFor = [], copyExists = false } = {}) {
+  const state = { spawned: [], spawnArgs: [], copies: [], removed: [], killed: 0, cdpUp: false };
   const deps = {
     existsSync: (p) => {
       if (p === MSIX_EXE) return true;
@@ -44,8 +44,12 @@ function msixDeps({ spawnFailures = [], cdpBindsFor = [], copyExists = false } =
       if (cmd.includes('taskkill')) { state.killed++; return ''; }
       throw new Error(`unexpected execSync: ${cmd}`);
     },
-    spawn: (exe) => {
+    spawn: (exe, args) => {
       state.spawned.push(exe);
+      state.spawnArgs.push(args);
+      if (spawnThrowsSyncFor.some((s) => exe.includes(s))) {
+        throw Object.assign(new Error('spawn EPERM'), { code: 'EPERM' });
+      }
       const fail = spawnFailures.some((s) => exe.includes(s));
       if (!fail && cdpBindsFor.some((s) => exe.includes(s))) state.cdpUp = true;
       return mockChild(fail ? { failWith: 'EACCES' } : {});
@@ -113,6 +117,27 @@ describe('launch() — MSIX WindowsApps handling', { skip: !onWindows }, () => {
     assert.equal(result.cdp_ready, false);
     assert.equal(result.msix_local_copy, true);
     assert.ok(result.warning);
+  });
+
+  it('synchronous spawn EPERM on direct WindowsApps launch falls back to local copy', async () => {
+    const { deps, state } = msixDeps({ spawnThrowsSyncFor: ['WindowsApps'], cdpBindsFor: ['tradingview-mcp'] });
+    const result = await launch({ _deps: deps });
+    assert.equal(result.success, true);
+    assert.equal(result.msix_local_copy, true);
+    assert.equal(result.binary, LOCAL_COPY_EXE);
+    assert.equal(state.spawned.length, 2);
+    assert.match(state.spawned[0], /WindowsApps/);
+    assert.match(state.spawned[1], /tradingview-mcp/);
+  });
+
+  it('local-copy relaunch adds --no-sandbox and --disable-gpu, direct attempt does not', async () => {
+    const { deps, state } = msixDeps({ spawnFailures: ['WindowsApps'], cdpBindsFor: ['tradingview-mcp'] });
+    const result = await launch({ _deps: deps });
+    assert.equal(result.success, true);
+    assert.equal(result.sandbox_disabled, true);
+    assert.ok(!state.spawnArgs[0].includes('--no-sandbox'));
+    assert.ok(state.spawnArgs[1].includes('--no-sandbox'));
+    assert.ok(state.spawnArgs[1].includes('--disable-gpu'));
   });
 });
 
