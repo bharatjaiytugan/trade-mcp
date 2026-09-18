@@ -14,7 +14,13 @@ If the user specifies a different install path, use that instead of `~/tradingvi
 
 ## Step 2: Add to MCP Config
 
-Add the server to the user's Claude Code MCP configuration. The config file is at `~/.claude/.mcp.json` (global) or `.mcp.json` (project-level).
+Add the server to the user's Claude Code MCP configuration. Prefer the CLI, which writes the correct file itself:
+
+```bash
+claude mcp add -s user tradingview node <INSTALL_PATH>/src/server.js
+```
+
+To edit by hand instead, use `~/.claude.json` under the top-level `mcpServers` key (user scope), or `.mcp.json` in the project root (project scope).
 
 ```json
 {
@@ -117,7 +123,7 @@ Then `tv status`, `tv quote`, `tv pine compile`, etc. work from anywhere.
 | `cdp_connected: false` | Launch TradingView with `--remote-debugging-port=9222` |
 | Windows: "Access is denied" launching from `WindowsApps` | Use `tv_launch` (auto copy-fallback) or the manual copy snippet in Step 3 — never `icacls` on WindowsApps |
 | `ECONNREFUSED` | TradingView isn't running or port 9222 is blocked |
-| MCP server not showing in Claude Code | Check `~/.claude/.mcp.json` syntax, restart Claude Code |
+| MCP server not showing in Claude Code | Run `claude mcp list`; check `~/.claude.json` syntax, restart Claude Code |
 | `tv` command not found | Run `npm link` from the project directory |
 | Tools return stale data | TradingView may still be loading — wait a few seconds |
 | Pine Editor tools fail | Open the Pine Editor panel first (`ui_open_panel pine-editor open`) |
