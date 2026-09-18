@@ -5,41 +5,79 @@ import { getClient, getTargetInfo, evaluate, CDP_HOST, CDP_PORT } from '../conne
 import { existsSync, cpSync, rmSync, readdirSync } from 'fs';
 import { execSync, spawn } from 'child_process';
 import { dirname, basename, join } from 'path';
+import { fileURLToPath } from 'url';
 
-// Best-effort git-pull update check: compare local HEAD to origin's default
-// branch on GitHub. Never throws — returns null on any failure (offline,
-// detached HEAD, not a git checkout) so it can't break the health check.
-let _updateCache = null;
-async function checkForUpdate() {
-  if (_updateCache && (Date.now() - _updateCache.at) < 3600_000) return _updateCache.value;
-  let value = null;
+// The server is usually started from a different working directory than its
+// own checkout, so git commands here resolve against the repo root rather
+// than cwd — otherwise the check silently reports nothing.
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const UPDATE_HINT = 'Run the tv_update tool (or `tv update` CLI) to update, then restart the MCP server.';
+
+// Only the network lookup is cached. The local HEAD is re-read on every call
+// so a commit made while the server is running shows up immediately instead
+// of being masked for an hour by a stale cache entry.
+let _remoteCache = null;
+
+export function _resetUpdateCache() { _remoteCache = null; }
+
+async function _fetchRemoteSha(repo) {
+  const http = await import('https');
+  return new Promise((resolve) => {
+    const req = http.get({
+      host: 'api.github.com', path: `/repos/${repo}/commits/HEAD`,
+      headers: { 'User-Agent': 'tradingview-mcp', Accept: 'application/vnd.github.sha' },
+    }, (res) => { let d = ''; res.on('data', (c) => d += c); res.on('end', () => resolve(res.statusCode === 200 ? d.trim() : null)); });
+    req.on('error', () => resolve(null));
+    req.setTimeout(3000, () => { req.destroy(); resolve(null); });
+  });
+}
+
+// Best-effort git update check: compare local HEAD to origin's default branch
+// on GitHub. Never throws — returns null on any failure (offline, detached
+// HEAD, not a git checkout) so it can't break the health check.
+export async function checkForUpdate({ _deps } = {}) {
+  const execFn = _deps?.execSync || execSync;
+  const fetchRemoteSha = _deps?.fetchRemoteSha || _fetchRemoteSha;
+  const now = _deps?.now || (() => Date.now());
+  const git = (cmd) => execFn(cmd, { cwd: REPO_ROOT, timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+
   try {
-    const localSha = execSync('git rev-parse HEAD', { timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-    const remoteUrl = execSync('git config --get remote.origin.url', { timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-    const m = remoteUrl.match(/github\.com[:/](.+?)(?:\.git)?$/);
-    if (localSha && m) {
-      const repo = m[1];
-      const http = await import('https');
-      const remoteSha = await new Promise((resolve) => {
-        const req = http.get({
-          host: 'api.github.com', path: `/repos/${repo}/commits/HEAD`,
-          headers: { 'User-Agent': 'tradingview-mcp', Accept: 'application/vnd.github.sha' },
-        }, (res) => { let d = ''; res.on('data', (c) => d += c); res.on('end', () => resolve(res.statusCode === 200 ? d.trim() : null)); });
-        req.on('error', () => resolve(null));
-        req.setTimeout(3000, () => { req.destroy(); resolve(null); });
-      });
-      if (remoteSha) {
-        value = {
-          update_available: remoteSha !== localSha,
-          local_commit: localSha.slice(0, 8),
-          latest_commit: remoteSha.slice(0, 8),
-          ...(remoteSha !== localSha && { hint: 'Run the tv_update tool (or `tv update` CLI) to update, then restart the MCP server.' }),
-        };
-      }
+    const localSha = git('git rev-parse HEAD');
+    if (!/^[0-9a-f]{40}$/i.test(localSha)) return null;
+
+    let remoteSha;
+    if (_remoteCache && (now() - _remoteCache.at) < 3600_000) {
+      remoteSha = _remoteCache.sha;
+    } else {
+      const remoteUrl = git('git config --get remote.origin.url');
+      const m = remoteUrl.match(/github.com[:/](.+?)(?:.git)?$/);
+      remoteSha = m ? await fetchRemoteSha(m[1]) : null;
+      _remoteCache = { at: now(), sha: remoteSha };
     }
+    if (!remoteSha || !/^[0-9a-f]{40}$/i.test(remoteSha)) return null;
+
+    // A bare inequality flags an update whenever HEAD differs from upstream,
+    // including when HEAD is *ahead* of it with local commits on top — which
+    // told contributors to run tv_update and overwrite their own work. The
+    // remote commit already being an ancestor of HEAD means we already have it.
+    let behind = remoteSha !== localSha;
+    if (behind) {
+      try {
+        if (git(`git cat-file -t ${remoteSha}`) === 'commit') {
+          git(`git merge-base --is-ancestor ${remoteSha} HEAD`); // non-zero exit throws
+          behind = false;
+        }
+      } catch { /* not fetched locally, or genuinely behind */ }
+    }
+
+    return {
+      update_available: behind,
+      local_commit: localSha.slice(0, 8),
+      latest_commit: remoteSha.slice(0, 8),
+      ...(behind && { hint: UPDATE_HINT }),
+    };
   } catch { /* best-effort */ }
-  _updateCache = { at: Date.now(), value };
-  return value;
+  return null;
 }
 
 export async function healthCheck() {
