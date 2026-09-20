@@ -1,14 +1,19 @@
 /**
  * Core drawing logic.
  */
-import { evaluate as _evaluate, getChartApi as _getChartApi, safeString, requireFinite } from '../connection.js';
+import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getChartApi as _getChartApi, safeString, requireFinite } from '../connection.js';
 
 function _resolve(deps) {
-  return { evaluate: deps?.evaluate || _evaluate, getChartApi: deps?.getChartApi || _getChartApi };
+  return {
+    evaluate: deps?.evaluate || _evaluate,
+    evaluateAsync: deps?.evaluateAsync || _evaluateAsync,
+    getChartApi: deps?.getChartApi || _getChartApi,
+    sleep: deps?.sleep || ((ms) => new Promise(r => setTimeout(r, ms))),
+  };
 }
 
 export async function drawShape({ shape, point, point2, overrides: overridesRaw, text, _deps }) {
-  const { evaluate, getChartApi } = _resolve(_deps);
+  const { evaluate, evaluateAsync, getChartApi, sleep } = _resolve(_deps);
   const overrides = overridesRaw ? (typeof overridesRaw === 'string' ? JSON.parse(overridesRaw) : overridesRaw) : {};
   const apiPath = await getChartApi();
   const overridesStr = JSON.stringify(overrides || {});
@@ -19,17 +24,18 @@ export async function drawShape({ shape, point, point2, overrides: overridesRaw,
 
   const before = await evaluate(`${apiPath}.getAllShapes().map(function(s) { return s.id; })`);
 
+  let createdId = null;
   if (point2) {
     const p2time = requireFinite(point2.time, 'point2.time');
     const p2price = requireFinite(point2.price, 'point2.price');
-    await evaluate(`
+    createdId = await evaluateAsync(`
       ${apiPath}.createMultipointShape(
         [{ time: ${p1time}, price: ${p1price} }, { time: ${p2time}, price: ${p2price} }],
         { shape: ${safeString(shape)}, overrides: ${overridesStr}, text: ${textStr} }
       )
     `);
   } else {
-    await evaluate(`
+    createdId = await evaluateAsync(`
       ${apiPath}.createShape(
         { time: ${p1time}, price: ${p1price} },
         { shape: ${safeString(shape)}, overrides: ${overridesStr}, text: ${textStr} }
@@ -37,11 +43,25 @@ export async function drawShape({ shape, point, point2, overrides: overridesRaw,
     `);
   }
 
-  await new Promise(r => setTimeout(r, 200));
-  const after = await evaluate(`${apiPath}.getAllShapes().map(function(s) { return s.id; })`);
-  const newId = (after || []).find(id => !(before || []).includes(id)) || null;
-  const result = { entity_id: newId };
-  return { success: true, shape, entity_id: result?.entity_id };
+  const expectedId = typeof createdId === 'string' && createdId ? createdId : null;
+  let newId = null;
+  const deadline = Date.now() + 1000;
+  for (let attempts = 0; attempts < 20 && Date.now() <= deadline; attempts++) {
+    const after = await evaluate(`${apiPath}.getAllShapes().map(function(s) { return s.id; })`);
+    if (!Array.isArray(after)) break;
+    newId = (expectedId && after.includes(expectedId) ? expectedId : null)
+      || after.find(id => !(before || []).includes(id))
+      || null;
+    if (newId || Date.now() >= deadline) break;
+    await sleep(50);
+  }
+
+  return {
+    success: Boolean(newId),
+    shape,
+    entity_id: newId,
+    ...(!newId && { error: 'shape_not_observed' }),
+  };
 }
 
 export async function listDrawings() {
