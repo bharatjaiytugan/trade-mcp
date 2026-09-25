@@ -31,6 +31,14 @@ register('indicator', {
       },
       handler: (opts, positionals) => {
         if (!positionals[0]) throw new Error('Entity ID required. Usage: tv indicator toggle eFu1Ot --visible');
+        // --visible is a presence flag, so `--visible false` parses as
+        // visible:true plus a stray positional and SHOWS the study — the
+        // opposite of what was asked. Refuse it rather than act on the wrong
+        // intent.
+        const stray = (positionals[1] || '').toLowerCase();
+        if (stray === 'true' || stray === 'false') {
+          throw new Error(`"--visible ${stray}" is not supported: --visible is a flag. Use --visible to show, or --hidden to hide.`);
+        }
         const visible = opts.hidden ? false : (opts.visible !== undefined ? opts.visible : true);
         return indCore.toggleVisibility({ entity_id: positionals[0], visible });
       },
